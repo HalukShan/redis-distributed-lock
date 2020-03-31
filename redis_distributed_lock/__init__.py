@@ -1,4 +1,5 @@
 import time
+import uuid
 
 
 class RDLock:
@@ -6,48 +7,39 @@ class RDLock:
         self.redisconn = redisconn
         self.sleeptime = sleeptime / 1000
         self.prefix = prefix
-        self.new_time = None
+        self.value = uuid.uuid1()
+        self.script = """
+                    if redis.call('get', KEYS[1]) == ARGV[1] then
+                        return redis.call('del', KEYS[1])
+                    else
+                        return 0
+                    end
+                """
 
-    def acquire(self, key, expire=5, timeout: int = None):
-        """ Acquire a redis distribution lock from redis connection with block mode"""
+    def acquire(self, key, expire=500, timeout: int = None):
+        """ Acquire a redis distribution lock from redis connection with block mode
+        :param
+            expire: int
+                key expire time (millisecond)
+            timeout: int
+                before timeout, keep trying (second)
+        """
         if timeout: assert isinstance(timeout, int)
         while True:
-            if self.redisconn.set(self.prefix + key, time.time() + expire, nx=True, ex=expire):
+            if self.redisconn.set(self.prefix + key, self.value, nx=True, px=expire*10):
                 return True
-            else:
-                current_lock_time = self.redisconn.get(self.prefix + key)
-                if current_lock_time:
-                    current_lock_time = float(current_lock_time)
-                    if time.time() > current_lock_time:
-                        new_time = time.time() + expire
-                        old_time_var = self.redisconn.getset(self.prefix + key, new_time, ex=expire)
-                        if old_time_var == current_lock_time:
-                            self.new_time = new_time
-                            return True
-                if timeout:
-                    if timeout <= 0: return False
-                    timeout -= self.sleeptime
-                time.sleep(self.sleeptime)
+            if timeout:
+                if timeout <= 0: return False
+                timeout -= self.sleeptime
+            time.sleep(self.sleeptime)
 
     def acquire_no_block(self, key, expire=5):
         """ Acquire a redis distribution lock from redis connection with No-block mode"""
-        if self.redisconn.set(self.prefix + key, time.time() + expire, nx=True, ex=expire):
+        if self.redisconn.set(self.prefix + key, self.value, nx=True, px=expire*10):
             return True
         else:
-            current_lock_time = self.redisconn.get(self.prefix + key)
-            if current_lock_time:
-                current_lock_time = float(current_lock_time)
-                if time.time() > current_lock_time:
-                    new_time = time.time() + expire
-                    old_time_var = self.redisconn.getset(self.prefix + key, new_time, ex=expire)
-                    if old_time_var == current_lock_time:
-                        self.new_time = new_time
-                        return True
-        return False
+            return False
 
     def release(self, key):
-        if self.new_time:
-            if time.time() > self.new_time:
-                self.new_time = None
-                return
-        self.redisconn.delete(self.prefix + key)
+        script = self.redisconn.register_script(self.script)
+        script(keys=[key], ARGV=[self.value])
